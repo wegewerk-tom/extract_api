@@ -1,0 +1,4 @@
+name = Extract API
+description = Interface for Extraction of Legacy Data
+core = 7.x
+package = "devel"

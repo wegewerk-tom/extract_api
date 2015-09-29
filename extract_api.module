@@ -1,0 +1,157 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+function extract_api_menu() {
+  $items['api/extract/%/%'] = array(
+    'page callback' => 'extract_api_page_callback',
+    'page arguments' => array(2,3),
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+/**
+ * API authorization using API key.
+ *
+ * To generating a key hash from command line:
+ *  echo -n "df2f32d3721ce1895b4e01030c2c59ef" | shasum -a512
+ *
+ * The set that hash in settings.php to provide access.
+ *  $conf['extract_api_key_hashes'] = array(
+ *    '801010f71745470e56fd...', // Good Bob's API key,
+ *    // 'd801010454f71440e56f...', // Evil Bob's API key,
+ *  );
+ */
+function extract_api_verify_key() {
+  if(!empty($_GET['api_key'])) {
+    $hashes = variable_get('extract_api_key_hashes', array());
+    foreach ($hashes as $hash) {
+      if($hash === hash('sha512', $_GET['api_key'])) {
+        return TRUE;
+      }
+    }
+  }
+  extract_api_response(NULL, 401, 'Unauthorized');
+}
+
+function extract_api_response($result = array(), $status = 200, $error = FALSE) {
+  // We are returning JSON, so tell the browser.
+  drupal_add_http_header('Content-Type', 'application/json; charset=utf-8');
+  drupal_add_http_header('Status', $status);
+  $return_data = array();
+  $return_data['result'] = $result;
+  $return_data['status'] = $status;
+  if($error) {
+    $return_data['error'] = $error;
+  }
+  if(variable_get('extract_api_pretty_print', TRUE)){
+    print json_encode($return_data, JSON_PRETTY_PRINT);
+  }
+  else {
+    print json_encode($return_data);
+  }
+  exit();
+}
+
+function extract_api_page_callback($type, $bundle) {
+  // Verify API Key first.
+  extract_api_verify_key();
+  $required_parameters = array(
+    'force_expire' => FALSE,
+  );
+  foreach($required_parameters as $param => $value) {
+    if(!isset($_GET[$param])) {
+      extract_api_response(NULL, 400, 'Must pass required parameters.');
+    }
+    else {
+      // Squash all params to integers.
+      $required_parameters[$param] = (int) $_GET[$param];
+    }
+  }
+  extract($required_parameters);
+
+  $force_expire = ($force_expire === 1) ? TRUE : FALSE;
+
+  $arguments = array(
+    'type' => $type,
+    'bundle' => $bundle,
+  );
+  $cache_key_components = array(
+    $type,
+    $bundle,
+  );
+  $query_data = wegewerk_fundament_cache('extract_api_process_request', $arguments, 300, $cache_key_components, $force_expire);
+  extract_api_response($query_data, 200);
+}
+
+function extract_api_process_request($entity_type, $bundle) {
+  $query_data = array();
+  $query = new EntityFieldQuery;
+  $query->entityCondition('entity_type', $entity_type)
+        ->propertyOrderBy('fid', 'ASC');
+  $query->entityCondition('bundle', array($bundle));
+  $results = $query->execute();
+
+  $entities = entity_load($entity_type, array_keys($results[$entity_type]));
+
+  $query_data['total']    = 0;
+  $query_data['entities'] = null;
+
+  $callbacks = array();
+  $alter_type = 'extract_api_'. $entity_type .'__'. $bundle .'_callbacks';
+  drupal_alter($alter_type, $callbacks);
+
+  foreach($entities as $entity){
+    $entity->entity_type = $entity_type;
+    $query_data['entities'][$entity->fid] = extract_api($entity, $callbacks);
+  }
+  $query_data['total'] = count($query_data['entities']);
+  return $query_data;
+}
+
+function extract_api($entity, $callbacks) {
+  $data = array();
+
+  // Add entity wrapper property callbacks automatically.
+  module_load_include('inc', 'entity', 'entity.wrapper');
+  $wrapper = entity_metadata_wrapper($entity->entity_type, $entity);
+  $callbacks['wrapper_property'] = array_keys($wrapper->getPropertyInfo());
+
+  foreach($callbacks as $callback => $properties) {
+    foreach($properties as $property) {
+      $arguments = array(
+        'entity'   => $entity,
+        'wrapper'  => $wrapper,
+        'property' => $property,
+      );
+      $namespaced_callback = 'extract_api_' . $callback;
+      if(function_exists($namespaced_callback)) {
+        if(empty($data[$property])) {
+          $data[$property] = call_user_func_array($namespaced_callback, $arguments);
+        }
+      }
+    }
+  }
+  return $data;
+}
+
+// This processor is mostly for easier debugging.
+function extract_api_entity($entity, $wrapper, $property) {
+  return $entity;
+}
+
+function extract_api_property($entity, $wrapper, $property) {
+  return $entity->{$property};
+}
+
+function extract_api_wrapper_property($entity, $wrapper, $property) {
+  return $wrapper->{$property}->raw();
+}
+
+function extract_api_field_date($entity, $wrapper, $property) {
+  $date = field_get_items($entity->entity_type, $entity, $property);
+  return $date;
+}

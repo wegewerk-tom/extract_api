@@ -1,4 +1,4 @@
-# Extract API
+# Drupal 7 Module - Extract API
 
 Access your entities via a securable HTTP API in a clean JSON format.
 
